@@ -74,6 +74,8 @@ apps/vision/
 ├── page_character_detector.py      # Adaptive panel segmentation & living target detection
 ├── multimodal_character_fusion.py  # Fusion engine (Vision + Dialogue OCR + Universe priors)
 ├── bridge.py                       # Interface bridge for dbi-generator & Archiving-Helper
+├── visualizer.py                   # Visual debugger & annotator (panels, heroes, bounding boxes)
+├── detect-characters.bat           # Drag & drop runner for comic archives and images
 ├── evaluate_inducks_accuracy.py    # Benchmark runner against Inducks human annotations
 └── README.md                       # Documentation
 ```
