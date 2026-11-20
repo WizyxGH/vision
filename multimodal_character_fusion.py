@@ -258,8 +258,9 @@ class MultiModalCharacterFusion:
                         ocr_counts[code] = ocr_counts.get(code, 0) + matches
 
         # 5. Consolidation et validation de la liste XAPP
-        # Seuil minimal de cases distinctes : 1 case pour 1-2 pages, 2 cases sinon
-        min_cases = 1 if num_pages <= 2 else 2
+        # Seuil minimal de cases distinctes : 1 case pour splash page unique, 2 cases sinon
+        total_panels_count = len(all_panels)
+        min_cases = 1 if total_panels_count <= 1 else 2
         validated_xapp: Set[str] = set()
 
         all_candidates = set(visual_panel_appearances.keys()) | set(ocr_counts.keys())
@@ -288,13 +289,13 @@ class MultiModalCharacterFusion:
             # Mentionné dans les dialogues (ex: Oncle Picsou ou Daisy cités dans l'histoire)
             if t_cnt >= 1:
                 validated_xapp.add(cand)
-            # Ou vu visuellement sur au moins min_cases
+            # Ou vu visuellement sur au moins min_cases distinctes
             elif v_panels >= min_cases and v_score >= min_score:
                 # Éviter la confusion classique PK (Fantomiald) vs DD (Donald)
                 if cand == "PK" and title_hero != "PK" and ("DD" in visual_panel_appearances or title_hero == "DD"):
                     continue
                 # Éviter la confusion Popop (FE) vs DD si Popop n'est pas cité
-                if cand == "FE" and title_hero != "FE" and v_score < 0.86:
+                if cand == "FE" and title_hero != "FE" and ("DD" in visual_panel_appearances or title_hero == "DD") and t_cnt == 0:
                     continue
                 validated_xapp.add(cand)
 
