@@ -1,0 +1,18 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyTorch checkpoints
+*.pt
+
+# Local images dataset (38k reference images from Inducks)
+data/references/
+data/test_*
+
+# Environments
+.env
+.env.*
+!.env.example
+
+scratch/
