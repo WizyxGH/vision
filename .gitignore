@@ -6,9 +6,11 @@ __pycache__/
 # PyTorch checkpoints
 *.pt
 
-# Local images dataset (38k reference images from Inducks)
+# Local images dataset & binary embeddings index (kept local)
 data/references/
 data/test_*
+data/*.npz
+*.npz
 
 # Environments
 .env

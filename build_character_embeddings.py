@@ -57,6 +57,18 @@ def load_dinov2_model(device: str = "cpu"):
     return model
 
 
+def fix_mojibake(text: str) -> str:
+    """Corrige les noms de personnages mal décodés (ex: DÃ³-RÃ©-Mi -> Dó-Ré-Mi)."""
+    if not text:
+        return ""
+    if "Ã" in text or "Â" in text:
+        try:
+            return text.encode("latin-1").decode("utf-8")
+        except Exception:
+            pass
+    return text
+
+
 def scan_reference_images(ref_dir: str) -> List[Dict[str, str]]:
     """Parcourt les sous-dossiers par personnage pour lister toutes les images."""
     items = []
@@ -67,7 +79,7 @@ def scan_reference_images(ref_dir: str) -> List[Dict[str, str]]:
         folder_path = os.path.join(ref_dir, hero_folder)
         if not os.path.isdir(folder_path):
             continue
-        hero = hero_folder
+        hero = fix_mojibake(hero_folder)
         for file in os.listdir(folder_path):
             if file.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
                 items.append({
