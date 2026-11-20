@@ -200,6 +200,7 @@ class MultiModalCharacterFusion:
 
         # 3. Analyse visuelle de toutes les cases
         visual_appearances: Dict[str, int] = {}
+        visual_panel_appearances: Dict[str, Set[Tuple[int, int]]] = {}
         visual_max_scores: Dict[str, float] = {}
         all_page_detections = []
         all_panels = []
@@ -211,26 +212,29 @@ class MultiModalCharacterFusion:
             for det in page_res["all_detections"]:
                 h = det["hero"]
                 raw_score = det["score"]
+                panel_idx = det.get("panel_index", 1)
 
                 # Pondération par l'univers Inducks :
-                # Bonus pour l'univers dominant, pénalité pour l'univers opposé
                 score = raw_score
                 if dominant_universe == "Ducks":
                     if h in UNIVERSE_DUCKS:
                         score += 0.03
                     elif h in UNIVERSE_MICE:
-                        score -= 0.06
+                        score -= 0.15
                 elif dominant_universe == "Mice":
                     if h in UNIVERSE_MICE:
                         score += 0.03
                     elif h in UNIVERSE_DUCKS:
-                        score -= 0.06
+                        score -= 0.15
 
                 det["adjusted_score"] = score
                 all_page_detections.append(det)
 
                 if score >= min_score:
                     visual_appearances[h] = visual_appearances.get(h, 0) + 1
+                    if h not in visual_panel_appearances:
+                        visual_panel_appearances[h] = set()
+                    visual_panel_appearances[h].add((p_idx, panel_idx))
                     visual_max_scores[h] = max(visual_max_scores.get(h, 0.0), score)
 
         # 4. OCR des dialogues si non fourni
@@ -254,45 +258,45 @@ class MultiModalCharacterFusion:
                         ocr_counts[code] = ocr_counts.get(code, 0) + matches
 
         # 5. Consolidation et validation de la liste XAPP
-        # Seuil minimal d'apparitions : 1 case pour les gags 1-2 pages, 2 cases sinon
+        # Seuil minimal de cases distinctes : 1 case pour 1-2 pages, 2 cases sinon
         min_cases = 1 if num_pages <= 2 else 2
         validated_xapp: Set[str] = set()
 
-        all_candidates = set(visual_appearances.keys()) | set(ocr_counts.keys())
+        all_candidates = set(visual_panel_appearances.keys()) | set(ocr_counts.keys())
 
         for cand in all_candidates:
-            v_cnt = visual_appearances.get(cand, 0)
+            v_panels = len(visual_panel_appearances.get(cand, set()))
             v_score = visual_max_scores.get(cand, 0.0)
             t_cnt = ocr_counts.get(cand, 0)
 
-            # Filtrage des personnages obscurs de la longue traîne (1-shot)
-            # Seuls les personnages récurrents majeurs peuvent être validés purement visuellement
+            # 1. Filtre univers strict : Aucune souris dans un univers Ducks sans citation explicite
+            if dominant_universe == "Ducks" and cand in UNIVERSE_MICE and t_cnt == 0:
+                continue
+            if dominant_universe == "Mice" and cand in UNIVERSE_DUCKS and t_cnt == 0:
+                continue
+
+            # 2. Personnages non-majeurs (1-shot / longue traîne) : rejetés sauf mention dialogue
             is_major = cand in MAJOR_DISNEY_CHARACTERS
             if not is_major:
-                # Les personnages secondaires n'entrent dans xapp que s'ils sont cités dans les dialogues ou score extrême (> 0.88)
                 if t_cnt >= 1:
                     validated_xapp.add(cand)
-                elif v_cnt >= 1 and v_score >= 0.88:
+                elif v_panels >= 2 and v_score >= 0.88:
                     validated_xapp.add(cand)
                 continue
 
-            # Règle A : Vu visuellement sur >= min_cases
-            if v_cnt >= min_cases and v_score >= min_score:
+            # 3. Personnages majeurs de l'univers :
+            # Mentionné dans les dialogues (ex: Oncle Picsou ou Daisy cités dans l'histoire)
+            if t_cnt >= 1:
                 validated_xapp.add(cand)
-
-            # Règle B : Vu visuellement (score >= 0.70) ET mentionné dans les dialogues
-            elif v_cnt >= 1 and t_cnt >= 1:
+            # Ou vu visuellement sur au moins min_cases
+            elif v_panels >= min_cases and v_score >= min_score:
+                # Éviter la confusion classique PK (Fantomiald) vs DD (Donald)
+                if cand == "PK" and title_hero != "PK" and ("DD" in visual_panel_appearances or title_hero == "DD"):
+                    continue
+                # Éviter la confusion Popop (FE) vs DD si Popop n'est pas cité
+                if cand == "FE" and title_hero != "FE" and v_score < 0.86:
+                    continue
                 validated_xapp.add(cand)
-
-            # Règle C : Score visuel très fort (>= 0.82) même sur 1 case
-            elif v_cnt >= 1 and v_score >= 0.82:
-                validated_xapp.add(cand)
-
-            # Règle D : Mentionné dans les dialogues (>= 2) dans l'univers dominant
-            elif t_cnt >= 2:
-                if (dominant_universe == "Ducks" and cand in UNIVERSE_DUCKS) or \
-                   (dominant_universe == "Mice" and cand in UNIVERSE_MICE):
-                    validated_xapp.add(cand)
 
         # Règle Dizni #210 : si un Title Hero est défini (différent de '--'), il DOIT être dans xapp
         if title_hero and title_hero != "--":
