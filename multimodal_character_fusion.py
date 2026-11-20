@@ -16,6 +16,7 @@ import numpy as np
 from PIL import Image
 
 from page_character_detector import PageCharacterDetector, DEFAULT_INDEX_PATH
+from search_character import MAJOR_DISNEY_CHARACTERS
 
 # Univers Inducks principaux
 UNIVERSE_DUCKS = {"DD", "US", "HDL", "DA", "FE", "PK", "GL", "GY", "BB", "MDS", "RKD", "LVD", "GD", "GU", "Battista", "Lusky", "FZ"}
@@ -138,9 +139,25 @@ class MultiModalCharacterFusion:
         banner_lines = extract_ocr_lines(title_banner, lang=lang)
         full_banner_text = " ".join(banner_lines) if banner_lines else splash_title_text
 
+        # Priorité aux titres de série isolés / logos imprimés (ex: 'DONALD DUCK', 'ZIO PAPERONE')
+        series_title_patterns = [
+            (re.compile(r"\b(?:donald\s+duck|donald)\b", re.I), "DD"),
+            (re.compile(r"\b(?:zio\s*paperone|uncle\s+scrooge)\b", re.I), "US"),
+            (re.compile(r"\b(?:topolino|mickey\s+mouse)\b", re.I), "MM"),
+            (re.compile(r"\b(?:paperinik|pikappa|fantomiald)\b", re.I), "PK"),
+            (re.compile(r"\b(?:paperoga|fethry)\b", re.I), "FE"),
+            (re.compile(r"\b(?:pippo|goofy)\b", re.I), "GO"),
+            (re.compile(r"\b(?:paperina|daisy\s+duck)\b", re.I), "DA"),
+        ]
+        # Vérifier d'abord si une ligne courte de titre contient directement le héros de la série
+        for line in banner_lines:
+            if len(line.strip()) < 30:
+                for pat, code in series_title_patterns:
+                    if pat.search(line):
+                        return code, line.strip()
+
         if full_banner_text:
             patterns = DIALOGUE_PATTERNS.get(lang.lower(), DIALOGUE_PATTERNS["it"])
-            # Rechercher aussi en anglais et français
             combined_patterns = patterns + DIALOGUE_PATTERNS.get("fr", []) + DIALOGUE_PATTERNS.get("en", [])
             for pat, code in combined_patterns:
                 if pat.search(full_banner_text):
@@ -226,14 +243,15 @@ class MultiModalCharacterFusion:
                     dialogue_texts[p_idx] = lines
 
         if dialogue_texts:
-            patterns = DIALOGUE_PATTERNS.get(lang.lower(), DIALOGUE_PATTERNS["it"])
+            # Recherche dans TOUTES les langues pour être robuste (fr, it, en, de)
             all_dialogue = " ".join(
                 line for lines in dialogue_texts.values() for line in lines
             )
-            for pat, code in patterns:
-                matches = len(pat.findall(all_dialogue))
-                if matches > 0:
-                    ocr_counts[code] = matches
+            for lang_key in DIALOGUE_PATTERNS:
+                for pat, code in DIALOGUE_PATTERNS[lang_key]:
+                    matches = len(pat.findall(all_dialogue))
+                    if matches > 0:
+                        ocr_counts[code] = ocr_counts.get(code, 0) + matches
 
         # 5. Consolidation et validation de la liste XAPP
         # Seuil minimal d'apparitions : 1 case pour les gags 1-2 pages, 2 cases sinon
@@ -246,6 +264,17 @@ class MultiModalCharacterFusion:
             v_cnt = visual_appearances.get(cand, 0)
             v_score = visual_max_scores.get(cand, 0.0)
             t_cnt = ocr_counts.get(cand, 0)
+
+            # Filtrage des personnages obscurs de la longue traîne (1-shot)
+            # Seuls les personnages récurrents majeurs peuvent être validés purement visuellement
+            is_major = cand in MAJOR_DISNEY_CHARACTERS
+            if not is_major:
+                # Les personnages secondaires n'entrent dans xapp que s'ils sont cités dans les dialogues ou score extrême (> 0.88)
+                if t_cnt >= 1:
+                    validated_xapp.add(cand)
+                elif v_cnt >= 1 and v_score >= 0.88:
+                    validated_xapp.add(cand)
+                continue
 
             # Règle A : Vu visuellement sur >= min_cases
             if v_cnt >= min_cases and v_score >= min_score:

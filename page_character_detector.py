@@ -136,19 +136,34 @@ class PageCharacterDetector:
 
         # B) Propositions multi-échelles pour les cases larges ou splash (quand YOLO a un faible rappel cartoon)
         if len(candidates) < 3 and pw >= 300 and ph >= 300:
-            # Sous-découpages typiques où se trouvent les personnages (tiers inférieurs et quadrants)
-            sub_proposals = [
-                # Moitié gauche et droite du bas
-                (int(pw * 0.08), int(ph * 0.55), int(pw * 0.50), int(ph * 0.96)),
-                (int(pw * 0.45), int(ph * 0.55), int(pw * 0.92), int(ph * 0.96)),
-                # Tiers gauche, centre, droite
-                (int(pw * 0.10), int(ph * 0.62), int(pw * 0.38), int(ph * 0.95)),
-                (int(pw * 0.32), int(ph * 0.62), int(pw * 0.60), int(ph * 0.95)),
-                (int(pw * 0.58), int(ph * 0.62), int(pw * 0.90), int(ph * 0.95)),
-            ]
-            for bx1, by1, bx2, by2 in sub_proposals:
-                if bx2 > bx1 and by2 > by1:
-                    candidates.append((panel_img.crop((bx1, by1, bx2, by2)), [bx1, by1, bx2, by2]))
+            # Grille glissante : découpe la case en sous-zones qui se chevauchent
+            # Tailles de fenêtre adaptées aux personnages debout (portrait) ou en pied
+            win_configs = []
+            # Fenêtres "personnage debout" : ~25-35% de largeur, ~30-40% de hauteur
+            for w_frac in [0.28, 0.35]:
+                for h_frac in [0.33, 0.40]:
+                    win_w = int(pw * w_frac)
+                    win_h = int(ph * h_frac)
+                    if win_w >= 100 and win_h >= 100:
+                        win_configs.append((win_w, win_h))
+
+            seen_zones = set()
+            for win_w, win_h in win_configs:
+                step_x = max(win_w // 2, 50)
+                step_y = max(win_h // 2, 50)
+                # Scan principalement dans la moitié inférieure (personnages debout au sol)
+                y_start = max(0, int(ph * 0.45))
+                for by in range(y_start, ph - win_h + 1, step_y):
+                    for bx in range(0, pw - win_w + 1, step_x):
+                        # Éviter les zones trop similaires à celles déjà vues
+                        zone_key = (bx // step_x, by // step_y)
+                        if zone_key in seen_zones:
+                            continue
+                        seen_zones.add(zone_key)
+                        candidates.append((
+                            panel_img.crop((bx, by, bx + win_w, by + win_h)),
+                            [bx, by, bx + win_w, by + win_h]
+                        ))
 
         # C) Si aucun candidat, analyser la case entière
         if not candidates and pw >= 60 and ph >= 60:
