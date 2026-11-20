@@ -6,6 +6,11 @@ __pycache__/
 # PyTorch checkpoints
 *.pt
 
+# Debug & temporary visual crops
+*.jpg
+*.jpeg
+*.png
+
 # Local images dataset & binary embeddings index (kept local)
 data/references/
 data/test_*

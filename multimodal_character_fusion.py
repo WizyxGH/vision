@@ -1,9 +1,9 @@
 """
 Moteur de Fusion Multi-Modale pour l'indexation des personnages Disney selon la norme Bolderbast.
 Combine :
-1. La détection visuelle de la tête/logo dans le bandeau de titre (Title Hero visuel).
-2. L'OCR textuel du titre (Title Hero textuel).
-3. La détection visuelle des personnages dans toutes les cases (DINOv2).
+1. L'OCR textuel du titre (Title Hero imprimé / logo).
+2. La détection visuelle de la tête/macaron dans le bandeau supérieur de la page 1.
+3. La segmentation des cases et reconnaissance visuelle multi-échelles (DINOv2).
 4. L'OCR des dialogues dans les bulles.
 5. La cohérence du graphe d'univers Inducks (Ducks vs Mice vs Forest).
 6. Les règles strictes de formatage Bolderbast (hero et [xapp:...]).
@@ -12,22 +12,22 @@ Combine :
 import os
 import re
 from typing import Dict, List, Tuple, Optional, Set
+import numpy as np
 from PIL import Image
 
 from page_character_detector import PageCharacterDetector, DEFAULT_INDEX_PATH
-import re
 
 # Univers Inducks principaux
 UNIVERSE_DUCKS = {"DD", "US", "HDL", "DA", "FE", "PK", "GL", "GY", "BB", "MDS", "RKD", "LVD", "GD", "GU", "Battista", "Lusky", "FZ"}
 UNIVERSE_MICE = {"MM", "GO", "PL", "MI", "CL", "HH", "PE", "PB", "EB", "IP", "CAS", "OH", "TR", "RS"}
 UNIVERSE_FOREST = {"BRB", "BW", "JW", "Fifer Pig", "Fiddler Pig", "Practical Pig"}
 
-# Dictionnaire OCR multi-langues des noms de personnages dans les dialogues
+# Dictionnaire OCR multi-langues des noms de personnages
 DIALOGUE_PATTERNS: Dict[str, List[Tuple[re.Pattern, str]]] = {
     "it": [
         (re.compile(r"\b(?:qui\s*,\s*quo\s*(?:,\s*|e\s*)qua|i\s+nipotini)\b", re.I), "HDL"),
         (re.compile(r"\b(?:banda\s+bassotti|i\s+bassotti|bassotti)\b", re.I), "BB"),
-        (re.compile(r"\b(?:zio\s+paperone|paperone)\b", re.I), "US"),
+        (re.compile(r"\b(?:zio\s*paperone|paperone)\b", re.I), "US"),
         (re.compile(r"\b(?:macchia\s+nera)\b", re.I), "PB"),
         (re.compile(r"\b(?:pico\s+de\s+paperis)\b", re.I), "LVD"),
         (re.compile(r"\b(?:indiana\s+pipps)\b", re.I), "IP"),
@@ -51,13 +51,13 @@ DIALOGUE_PATTERNS: Dict[str, List[Tuple[re.Pattern, str]]] = {
     "fr": [
         (re.compile(r"\b(?:riri\s*,\s*fifi\s*(?:,\s*|et\s*)loulou|riri\s+fifi\s+loulou|les\s+neveux)\b", re.I), "HDL"),
         (re.compile(r"\b(?:les\s+rapetou|rapetou)\b", re.I), "BB"),
-        (re.compile(r"\b(?:oncle\s+picsou|picsou)\b", re.I), "US"),
+        (re.compile(r"\b(?:oncle\s*picsou|onc'?\s*picsou|picsou)\b", re.I), "US"),
         (re.compile(r"\b(?:fant[oô]me\s+noir)\b", re.I), "PB"),
         (re.compile(r"\b(?:g[eé]o\s+trouvetou)\b", re.I), "GY"),
         (re.compile(r"\b(?:pat\s+hibulaire)\b", re.I), "PE"),
         (re.compile(r"\b(?:miss\s+tick)\b", re.I), "MDS"),
         (re.compile(r"\b(?:flairsou)\b", re.I), "RKD"),
-        (re.compile(r"\b(?:donald)\b", re.I), "DD"),
+        (re.compile(r"\b(?:donald\s+duck|donald)\b", re.I), "DD"),
         (re.compile(r"\b(?:daisy)\b", re.I), "DA"),
         (re.compile(r"\b(?:popop)\b", re.I), "FE"),
         (re.compile(r"\b(?:fantomiald)\b", re.I), "PK"),
@@ -84,6 +84,35 @@ DIALOGUE_PATTERNS: Dict[str, List[Tuple[re.Pattern, str]]] = {
     ]
 }
 
+_OCR_SINGLETON = None
+
+
+def get_ocr_engine(lang: str = "it"):
+    """Singleton PaddleOCR CPU sécurisé (évite les conflits DLL CUDNN)."""
+    global _OCR_SINGLETON
+    if _OCR_SINGLETON is None:
+        try:
+            from paddleocr import PaddleOCR
+            _OCR_SINGLETON = PaddleOCR(use_gpu=False, use_angle_cls=False, lang=lang, show_log=False)
+        except Exception:
+            _OCR_SINGLETON = False
+    return _OCR_SINGLETON if _OCR_SINGLETON is not False else None
+
+
+def extract_ocr_lines(img: Image.Image, lang: str = "it") -> List[str]:
+    """Extrait le texte lisible d'une image PIL en CPU."""
+    ocr = get_ocr_engine(lang)
+    if not ocr:
+        return []
+    try:
+        arr = np.array(img.convert("RGB"))
+        res = ocr.ocr(arr, cls=False)
+        if res and res[0]:
+            return [line[1][0] for line in res[0] if line and line[1]]
+    except Exception:
+        pass
+    return []
+
 
 class MultiModalCharacterFusion:
     def __init__(self, index_path: str = DEFAULT_INDEX_PATH):
@@ -94,33 +123,35 @@ class MultiModalCharacterFusion:
         first_page_img: Image.Image,
         splash_title_text: str = "",
         lang: str = "it"
-    ) -> str:
+    ) -> Tuple[str, str]:
         """
-        Détermine le Title Hero (colonne hero du .dbi) selon Bolderbast :
-        1. Recherche d'un macaron/logo visuel avec la tête du personnage dans le bandeau de titre.
-        2. Recherche d'un nom de personnage explicite dans le texte du titre.
-        3. Si absent : retourne '--' conformément à Bolderbast.
+        Détermine le Title Hero (colonne hero Bolderbast) selon la règle stricte :
+        1. OCR du texte du titre imprimé dans les 30% supérieurs de la page 1.
+        2. Détection visuelle du logo/macaron dans le bandeau supérieur.
+        3. Si aucun héros dans le titre : '--'.
+        Retourne : (hero_code, titre_detecte)
         """
         pw, ph = first_page_img.size
-
-        # A) Extraction du bandeau de titre (environ les 25-30% supérieurs de la page de splash)
         title_banner = first_page_img.crop((0, 0, pw, int(ph * 0.32)))
-        banner_detections = self.detector.detect_in_panel(title_banner, min_score=0.76)
 
-        if banner_detections:
-            # On privilégie un personnage nettement identifié dans le bandeau du titre
-            visual_title_hero = banner_detections[0]["hero"]
-            return visual_title_hero
+        # 1. OCR textuel direct dans le bandeau de titre
+        banner_lines = extract_ocr_lines(title_banner, lang=lang)
+        full_banner_text = " ".join(banner_lines) if banner_lines else splash_title_text
 
-        # B) Analyse textuelle du titre imprimé (OCR)
-        if splash_title_text:
+        if full_banner_text:
             patterns = DIALOGUE_PATTERNS.get(lang.lower(), DIALOGUE_PATTERNS["it"])
-            for pat, code in patterns:
-                if pat.search(splash_title_text):
-                    return code
+            # Rechercher aussi en anglais et français
+            combined_patterns = patterns + DIALOGUE_PATTERNS.get("fr", []) + DIALOGUE_PATTERNS.get("en", [])
+            for pat, code in combined_patterns:
+                if pat.search(full_banner_text):
+                    return code, full_banner_text
 
-        # C) Règle Bolderbast : aucun personnage dans le titre = '--'
-        return "--"
+        # 2. Détection visuelle du logo/tête dans le bandeau supérieur
+        banner_detections = self.detector.detect_in_panel(title_banner, min_score=0.76)
+        if banner_detections:
+            return banner_detections[0]["hero"], full_banner_text
+
+        return "--", full_banner_text
 
     def analyze_story(
         self,
@@ -138,21 +169,62 @@ class MultiModalCharacterFusion:
         if num_pages == 0:
             return "--", [], {}
 
-        # 1. Détermination du Title Hero sur la première page (Bandeau de titre)
-        title_hero = self.detect_title_hero(page_images[0], splash_title_text=splash_title_text, lang=lang)
+        # 1. Détermination du Title Hero sur la page 1
+        title_hero, title_text = self.detect_title_hero(
+            page_images[0], splash_title_text=splash_title_text, lang=lang
+        )
 
-        # 2. Analyse visuelle de toutes les cases de l'histoire
+        # 2. Détermination de l'univers prioritaire initial (si héros de titre connu)
+        dominant_universe = "Ducks"
+        if title_hero in UNIVERSE_MICE:
+            dominant_universe = "Mice"
+        elif title_hero in UNIVERSE_FOREST:
+            dominant_universe = "Forest"
+
+        # 3. Analyse visuelle de toutes les cases
         visual_appearances: Dict[str, int] = {}
         visual_max_scores: Dict[str, float] = {}
+        all_page_detections = []
+        all_panels = []
 
         for p_idx, page_img in enumerate(page_images, start=1):
             page_res = self.detector.analyze_page(page_img, min_score=min_score)
-            for h, cnt in page_res["hero_counts"].items():
-                visual_appearances[h] = visual_appearances.get(h, 0) + cnt
-                visual_max_scores[h] = max(visual_max_scores.get(h, 0.0), page_res["hero_max_scores"][h])
+            all_panels.extend(page_res["panels"])
 
-        # 3. Analyse OCR des dialogues
+            for det in page_res["all_detections"]:
+                h = det["hero"]
+                raw_score = det["score"]
+
+                # Pondération par l'univers Inducks :
+                # Bonus pour l'univers dominant, pénalité pour l'univers opposé
+                score = raw_score
+                if dominant_universe == "Ducks":
+                    if h in UNIVERSE_DUCKS:
+                        score += 0.03
+                    elif h in UNIVERSE_MICE:
+                        score -= 0.06
+                elif dominant_universe == "Mice":
+                    if h in UNIVERSE_MICE:
+                        score += 0.03
+                    elif h in UNIVERSE_DUCKS:
+                        score -= 0.06
+
+                det["adjusted_score"] = score
+                all_page_detections.append(det)
+
+                if score >= min_score:
+                    visual_appearances[h] = visual_appearances.get(h, 0) + 1
+                    visual_max_scores[h] = max(visual_max_scores.get(h, 0.0), score)
+
+        # 4. OCR des dialogues si non fourni
         ocr_counts: Dict[str, int] = {}
+        if dialogue_texts is None:
+            dialogue_texts = {}
+            for p_idx, page_img in enumerate(page_images, start=1):
+                lines = extract_ocr_lines(page_img, lang=lang)
+                if lines:
+                    dialogue_texts[p_idx] = lines
+
         if dialogue_texts:
             patterns = DIALOGUE_PATTERNS.get(lang.lower(), DIALOGUE_PATTERNS["it"])
             all_dialogue = " ".join(
@@ -163,18 +235,7 @@ class MultiModalCharacterFusion:
                 if matches > 0:
                     ocr_counts[code] = matches
 
-        # 4. Détermination de l'univers dominant (Prior d'univers Inducks)
-        ducks_votes = sum(visual_appearances.get(h, 0) for h in UNIVERSE_DUCKS)
-        mice_votes = sum(visual_appearances.get(h, 0) for h in UNIVERSE_MICE)
-        forest_votes = sum(visual_appearances.get(h, 0) for h in UNIVERSE_FOREST)
-
-        dominant_universe = "Ducks"
-        if mice_votes > ducks_votes and mice_votes > forest_votes:
-            dominant_universe = "Mice"
-        elif forest_votes > ducks_votes and forest_votes > mice_votes:
-            dominant_universe = "Forest"
-
-        # 5. Fusion et validation de la liste XAPP
+        # 5. Consolidation et validation de la liste XAPP
         # Seuil minimal d'apparitions : 1 case pour les gags 1-2 pages, 2 cases sinon
         min_cases = 1 if num_pages <= 2 else 2
         validated_xapp: Set[str] = set()
@@ -194,11 +255,11 @@ class MultiModalCharacterFusion:
             elif v_cnt >= 1 and t_cnt >= 1:
                 validated_xapp.add(cand)
 
-            # Règle C : Score visuel très fort (>= 0.84) même sur 1 case
-            elif v_cnt >= 1 and v_score >= 0.84:
+            # Règle C : Score visuel très fort (>= 0.82) même sur 1 case
+            elif v_cnt >= 1 and v_score >= 0.82:
                 validated_xapp.add(cand)
 
-            # Règle D : Mentionné plusieurs fois dans les dialogues (>= 2) dans l'univers dominant
+            # Règle D : Mentionné dans les dialogues (>= 2) dans l'univers dominant
             elif t_cnt >= 2:
                 if (dominant_universe == "Ducks" and cand in UNIVERSE_DUCKS) or \
                    (dominant_universe == "Mice" and cand in UNIVERSE_MICE):
@@ -214,13 +275,16 @@ class MultiModalCharacterFusion:
 
         details = {
             "title_hero": title_hero,
+            "title_text": title_text,
             "xapp_str": xapp_str,
             "xapp_tag": f"[xapp:{xapp_str}]" if xapp_str else "",
             "dominant_universe": dominant_universe,
             "visual_appearances": visual_appearances,
             "visual_max_scores": visual_max_scores,
             "ocr_counts": ocr_counts,
-            "total_pages": num_pages
+            "total_pages": num_pages,
+            "panels": all_panels,
+            "all_detections": all_page_detections
         }
 
         return title_hero, xapp_sorted, details

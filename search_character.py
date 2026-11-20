@@ -14,6 +14,14 @@ from PIL import Image
 DEFAULT_INDEX_PATH = os.path.join(os.path.dirname(__file__), "data", "character_embeddings.npz")
 
 
+# Personnages majeurs de l'univers Disney (prior bayésien pour éviter les imposteurs de la longue traîne)
+MAJOR_DISNEY_CHARACTERS = {
+    "DD", "US", "HDL", "DA", "FE", "GL", "GY", "MM", "GO", "PL",
+    "MI", "CL", "HH", "PE", "PB", "PK", "BB", "MDS", "RKD", "LVD",
+    "GD", "GU", "Battista", "Lusky", "FZ", "IP", "CAS", "OH", "TR", "RS"
+}
+
+
 def fix_mojibake(text: str) -> str:
     """Corrige les noms de personnages mal décodés (ex: DÃ³-RÃ©-Mi -> Dó-Ré-Mi)."""
     if not text:
@@ -131,6 +139,10 @@ class CharacterMatcher:
                 # Score équilibré : 70% meilleure référence, 30% centroïde
                 # Protège contre les parasites qui n'ont pollué qu'une seule image
                 combined_score = 0.7 * float(score) + 0.3 * p_score
+                # Prior bayésien : léger bonus (+0.035) pour les personnages récurrents
+                # évite qu'un personnage à 1 seule référence n'usurpe Donald, Mickey ou Picsou
+                if hero in MAJOR_DISNEY_CHARACTERS:
+                    combined_score += 0.035
                 hero_scores[hero] = {
                     "hero": hero,
                     "score": combined_score,

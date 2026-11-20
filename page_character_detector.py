@@ -26,59 +26,49 @@ LIVING_CLASSES = {"person", "bird", "cat", "dog", "teddy bear", "horse", "sheep"
 def segment_panels_adaptive(img: Image.Image) -> List[Tuple[int, int, int, int]]:
     """
     Découpe une planche de BD en cases individuelles (panels) en détectant
-    les gouttières de séparation basées sur la couleur réelle des marges de la page.
+    les gouttières de séparation claires (papier/fond).
+    Gère aussi bien les planches multi-cases que les splash pages pleine page.
     Retourne la liste des boîtes [x1, y1, x2, y2] triées dans l'ordre de lecture.
     """
     orig_w, orig_h = img.size
-    # Redimensionnement temporaire pour une analyse vectorielle ultra-rapide
     analysis_w = 600
     analysis_h = int(analysis_w * orig_h / orig_w)
-    thumb = img.resize((analysis_w, analysis_h), Image.Resampling.BILINEAR)
-    arr = np.array(thumb, dtype=np.int16)
+    thumb = img.convert("L").resize((analysis_w, analysis_h), Image.Resampling.BILINEAR)
+    arr = np.array(thumb)
 
-    # 1. Échantillonner la couleur de fond sur le pourtour extérieur
-    m = max(3, analysis_w // 40)
-    border = np.concatenate([
-        arr[:, :m].reshape(-1, 3),
-        arr[:, -m:].reshape(-1, 3),
-        arr[:m, :].reshape(-1, 3),
-        arr[-m:, :].reshape(-1, 3)
-    ])
-    bg_color = np.median(border, axis=0)
+    # Le fond de papier des gouttières est dans les percentiles élevés (>= 80%)
+    bg_thresh = max(190, int(np.percentile(arr, 85)))
+    is_bg = arr >= bg_thresh
 
-    # 2. Masque binaire des pixels proches du fond (gouttières et marges)
-    diff = np.abs(arr - bg_color).sum(axis=2)
-    is_bg = diff < 48
-
-    # 3. Détection des bandes horizontales (tiers)
+    # 1. Détection des bandes horizontales (strips)
     row_bg_ratio = is_bg[:, int(analysis_w * 0.05):int(analysis_w * 0.95)].mean(axis=1)
     strips = []
     in_strip = False
     start_y = 0
 
     for y in range(analysis_h):
-        if row_bg_ratio[y] < 0.88:
+        if row_bg_ratio[y] < 0.78:
             if not in_strip:
                 in_strip = True
                 start_y = y
         else:
             if in_strip:
                 in_strip = False
-                if (y - start_y) > 0.07 * analysis_h:
+                if (y - start_y) > 0.08 * analysis_h:
                     strips.append((start_y, y))
 
-    if in_strip and (analysis_h - start_y) > 0.07 * analysis_h:
+    if in_strip and (analysis_h - start_y) > 0.08 * analysis_h:
         strips.append((start_y, analysis_h))
 
-    # Si aucune bande distincte n'est trouvée, considérer la page comme une case unique
-    if not strips:
+    # Si aucune séparation horizontale claire n'est trouvée (ex: splash page pleine page)
+    if not strips or len(strips) <= 1:
         return [(0, 0, orig_w, orig_h)]
 
     scale_x = orig_w / analysis_w
     scale_y = orig_h / analysis_h
     panels = []
 
-    # 4. Découpage horizontal en cases à l'intérieur de chaque bande
+    # 2. Découpage horizontal en cases à l'intérieur de chaque bande
     for (y1, y2) in strips:
         strip_bg = is_bg[y1:y2, :]
         col_bg_ratio = strip_bg.mean(axis=0)
@@ -86,7 +76,7 @@ def segment_panels_adaptive(img: Image.Image) -> List[Tuple[int, int, int, int]]
         in_panel = False
         start_x = 0
         for x in range(analysis_w):
-            if col_bg_ratio[x] < 0.85:
+            if col_bg_ratio[x] < 0.78:
                 if not in_panel:
                     in_panel = True
                     start_x = x
@@ -119,41 +109,68 @@ class PageCharacterDetector:
     def detect_in_panel(self, panel_img: Image.Image, min_score: float = 0.70) -> List[Dict]:
         """Détecte et identifie les personnages présents à l'intérieur d'une case."""
         pw, ph = panel_img.size
-        candidates = []
+        candidates: List[Tuple[Image.Image, List[int]]] = []
 
-        # A) Détection via YOLO si disponible
+        # A) Détection via YOLO si disponible (seuil abaissé pour cartoon)
         if self.yolo_model:
-            results = self.yolo_model(panel_img, conf=0.20, verbose=False)
-            for r in results:
-                for b in r.boxes:
-                    name = self.yolo_model.names[int(b.cls[0])]
-                    conf = float(b.conf[0])
-                    if name in LIVING_CLASSES:
-                        x1, y1, x2, y2 = [int(v) for v in b.xyxy[0].tolist()]
-                        # Filtrer les boîtes trop petites
-                        if (x2 - x1) >= 35 and (y2 - y1) >= 35:
-                            # Marge de 15% pour inclure la coiffe / le vêtement
-                            bw, bh = x2 - x1, y2 - y1
-                            x1_m = max(0, int(x1 - 0.15 * bw))
-                            y1_m = max(0, int(y1 - 0.15 * bh))
-                            x2_m = min(pw, int(x2 + 0.15 * bw))
-                            y2_m = min(ph, int(y2 + 0.15 * bh))
-                            candidates.append(panel_img.crop((x1_m, y1_m, x2_m, y2_m)))
+            try:
+                results = self.yolo_model(panel_img, conf=0.10, verbose=False)
+                for r in results:
+                    for b in r.boxes:
+                        name = self.yolo_model.names[int(b.cls[0])]
+                        conf = float(b.conf[0])
+                        if name in LIVING_CLASSES:
+                            x1, y1, x2, y2 = [int(v) for v in b.xyxy[0].tolist()]
+                            if (x2 - x1) >= 30 and (y2 - y1) >= 30:
+                                bw, bh = x2 - x1, y2 - y1
+                                x1_m = max(0, int(x1 - 0.15 * bw))
+                                y1_m = max(0, int(y1 - 0.15 * bh))
+                                x2_m = min(pw, int(x2 + 0.15 * bw))
+                                y2_m = min(ph, int(y2 + 0.15 * bh))
+                                candidates.append((
+                                    panel_img.crop((x1_m, y1_m, x2_m, y2_m)),
+                                    [x1_m, y1_m, x2_m, y2_m]
+                                ))
+            except Exception:
+                pass
 
-        # B) Si aucun personnage n'a été détecté par YOLO (ex: gros plan stylisé), analyser la case entière
+        # B) Propositions multi-échelles pour les cases larges ou splash (quand YOLO a un faible rappel cartoon)
+        if len(candidates) < 3 and pw >= 300 and ph >= 300:
+            # Sous-découpages typiques où se trouvent les personnages (tiers inférieurs et quadrants)
+            sub_proposals = [
+                # Moitié gauche et droite du bas
+                (int(pw * 0.08), int(ph * 0.55), int(pw * 0.50), int(ph * 0.96)),
+                (int(pw * 0.45), int(ph * 0.55), int(pw * 0.92), int(ph * 0.96)),
+                # Tiers gauche, centre, droite
+                (int(pw * 0.10), int(ph * 0.62), int(pw * 0.38), int(ph * 0.95)),
+                (int(pw * 0.32), int(ph * 0.62), int(pw * 0.60), int(ph * 0.95)),
+                (int(pw * 0.58), int(ph * 0.62), int(pw * 0.90), int(ph * 0.95)),
+            ]
+            for bx1, by1, bx2, by2 in sub_proposals:
+                if bx2 > bx1 and by2 > by1:
+                    candidates.append((panel_img.crop((bx1, by1, bx2, by2)), [bx1, by1, bx2, by2]))
+
+        # C) Si aucun candidat, analyser la case entière
         if not candidates and pw >= 60 and ph >= 60:
-            candidates.append(panel_img)
+            candidates.append((panel_img, [0, 0, pw, ph]))
 
         # Identification via DINOv2
         detections = []
-        for crop in candidates:
+        seen_heroes_in_panel = set()
+
+        for crop, box in candidates:
             preds = self.matcher.identify(crop, top_k=2, aggregate_by_hero=True)
             if preds and preds[0]["score"] >= min_score:
-                detections.append({
-                    "hero": preds[0]["hero"],
-                    "score": preds[0]["score"],
-                    "reference": preds[0]["best_reference"]
-                })
+                h = preds[0]["hero"]
+                # Déduplication : on garde la meilleure boîte pour chaque héros dans cette case
+                if h not in seen_heroes_in_panel:
+                    seen_heroes_in_panel.add(h)
+                    detections.append({
+                        "hero": h,
+                        "score": preds[0]["score"],
+                        "reference": preds[0]["best_reference"],
+                        "box": box
+                    })
 
         return detections
 
@@ -161,7 +178,7 @@ class PageCharacterDetector:
         """
         Analyse une page de BD complète :
         1. Découpe en cases
-        2. Détection des personnages par case
+        2. Détection des personnages par case (avec coordonnées absolues)
         3. Consolidation et classement des apparitions
         """
         if isinstance(img_input, str):
@@ -172,6 +189,7 @@ class PageCharacterDetector:
 
         panels = segment_panels_adaptive(img)
         panel_detections = []
+        all_detections = []
         hero_counts = {}
         hero_max_scores = {}
 
@@ -179,11 +197,23 @@ class PageCharacterDetector:
             panel_crop = img.crop((x1, y1, x2, y2))
             chars_in_panel = self.detect_in_panel(panel_crop, min_score=min_score)
 
-            # Éviter de compter deux fois le même héros dans la même case
             seen_in_panel = set()
             for det in chars_in_panel:
                 h = det["hero"]
                 score = det["score"]
+                bx1, by1, bx2, by2 = det["box"]
+                # Coordonnées absolues sur la planche complète
+                abs_box = [x1 + bx1, y1 + by1, x1 + bx2, y1 + by2]
+
+                all_detections.append({
+                    "hero": h,
+                    "score": score,
+                    "panel_index": p_idx,
+                    "panel_box": [x1, y1, x2, y2],
+                    "box": abs_box,
+                    "reference": det["reference"]
+                })
+
                 if h not in seen_in_panel:
                     seen_in_panel.add(h)
                     hero_counts[h] = hero_counts.get(h, 0) + 1
@@ -195,56 +225,18 @@ class PageCharacterDetector:
                 "characters": chars_in_panel
             })
 
-        # Trier les personnages par nombre d'apparitions puis score
         sorted_heroes = sorted(
             hero_counts.keys(),
             key=lambda h: (hero_counts[h], hero_max_scores[h]),
             reverse=True
         )
 
-        main_hero = sorted_heroes[0] if sorted_heroes else ""
-        xapp = sorted(sorted_heroes)
-
         return {
-            "total_panels": len(panels),
-            "panels": panel_detections,
-            "detected_characters": sorted_heroes,
+            "panels": panels,
+            "panel_detections": panel_detections,
+            "all_detections": all_detections,
             "hero_counts": hero_counts,
             "hero_max_scores": hero_max_scores,
-            "main_hero": main_hero,
-            "xapp": xapp
+            "sorted_heroes": sorted_heroes,
+            "top_hero": sorted_heroes[0] if sorted_heroes else "--"
         }
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Analyse une page de BD pour détecter les personnages Disney")
-    parser.add_argument("image", help="Chemin vers la page scannée")
-    parser.add_argument("--index", default=DEFAULT_INDEX_PATH, help="Chemin vers l'index DINOv2")
-    parser.add_argument("--min-score", type=float, default=0.72, help="Score de similarité cosinus minimum (0.0 à 1.0)")
-    parser.add_argument("--json", action="store_true", help="Sortie au format JSON brut")
-
-    args = parser.parse_args()
-
-    detector = PageCharacterDetector(index_path=args.index)
-    res = detector.analyze_page(args.image, min_score=args.min_score)
-
-    if args.json:
-        print(json.dumps(res, indent=2, ensure_ascii=False))
-        return
-
-    print(f"\n=======================================================")
-    print(f" Planche : {os.path.basename(args.image)}")
-    print(f" Cases détectées : {res['total_panels']}")
-    print(f"=======================================================")
-    print(f" Héros principal présumé : {res['main_hero'] or 'Non déterminé'}")
-    print(f" Liste d'apparitions (xapp) : {', '.join(res['xapp']) if res['xapp'] else 'Aucun'}\n")
-
-    print("Détail des personnages détectés :")
-    for h in res["detected_characters"]:
-        count = res["hero_counts"][h]
-        max_s = res["hero_max_scores"][h] * 100
-        print(f"  • {h:<18} : vu dans {count:2d} case(s) (score max: {max_s:5.1f}%)")
-
-
-if __name__ == "__main__":
-    main()
