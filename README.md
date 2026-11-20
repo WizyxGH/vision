@@ -73,6 +73,7 @@ apps/vision/
 ├── search_character.py             # Instant character matcher with prototype regularization
 ├── page_character_detector.py      # Adaptive panel segmentation & living target detection
 ├── multimodal_character_fusion.py  # Fusion engine (Vision + Dialogue OCR + Universe priors)
+├── dialogue_speaker_extractor.py   # Structured OCR, speech bubbles & speaker attribution engine
 ├── bridge.py                       # Interface bridge for dbi-generator & Archiving-Helper
 ├── visualizer.py                   # Visual debugger & annotator (panels, heroes, bounding boxes)
 ├── detect-characters.bat           # Drag & drop runner for comic archives and images
@@ -109,6 +110,24 @@ print('Hero:', hero)
 print('XAPP:', stats['xapp_tag'])
 "
 ```
+
+### 4. Structured OCR & Dialogue Speaker Attribution
+Extract panels, cluster text lines into speech bubbles, classify them without noise suppression, and attribute speakers by geometric proximity to detected characters:
+```bash
+python dialogue_speaker_extractor.py "path/to/page.jpg"
+```
+Produces a structured JSON document and a readable screenplay transcript:
+```text
+┌─── CASE #2 (Personnages : DD)
+│   💬 [DD]           : « E VISTO CHE ABBIAMO INTA- SCATO UNO SPROPOSITO... »
+│   💬 [DD]           : « VIVA MISTER GOOSE! »
+└───
+┌─── CASE #3 (Personnages : US)
+│   💥 [EFFET SONORE]: *URRA!*
+│   💥 [EFFET SONORE]: *SGURGLE!*
+└───
+```
+Powers **Pipeline v2** in `apps/transcript` while maintaining full FTS5 search compatibility.
 
 ---
 

@@ -43,6 +43,20 @@ NARRATIVE_MARKERS = [
 ]
 NARRATIVE_RE = re.compile("|".join(NARRATIVE_MARKERS), re.IGNORECASE)
 
+# Mot-clés de métadonnées, titres, codes Inducks et signatures
+HEADER_METADATA_PATTERNS = [
+    r"^\s*walt\s*disney\s*$",
+    r"^\s*(?:ip|i|d|fr|de|nl|gr|us|s|w)\s*[-/]?\s*\d+[-/]\w+\s*$",
+    r"^\s*topolino\s*\d*\s*$",
+    r"^\s*\d+\s*$",
+    r"^\s*(?:continua|fine|segue|à suivre|fin)\s*$",
+]
+HEADER_METADATA_RE = re.compile("|".join(HEADER_METADATA_PATTERNS), re.IGNORECASE)
+SOUND_EFFECT_RE = re.compile(
+    r"\b(?:boom|bam|clac|crash|slam|gulp|gloups|bang|pant|sigh|sob|argh|gasp|swoosh|wrooom|vrooom|smack|ring|dring|drin|toc|knock|snif|splash|plop|roar|yikes|oof|ouch)\b",
+    re.IGNORECASE
+)
+
 
 def cluster_text_lines_into_bubbles(lines: List[Dict], max_y_dist_ratio: float = 1.3) -> List[Dict]:
     """
@@ -125,7 +139,11 @@ def classify_text_block(block: Dict, panel_bbox: Tuple[int, int, int, int], is_f
     bw, bh = bx2 - bx1, by2 - by1
     pw, ph = px2 - px1, py2 - py1
 
-    # 1. En-tête de page (ex: TOPOLINO, numéro en tout début de planche)
+    # 1. En-tête de page, titre, signature ou code histoire
+    clean_no_space = re.sub(r"\s+", "", text.lower())
+    if "waltdisney" in clean_no_space or HEADER_METADATA_RE.search(text):
+        return "header"
+
     if is_first_panel and by1 < py1 + 80 and ("topolino" in text.lower() or text.isdigit()):
         return "header"
 
@@ -138,8 +156,8 @@ def classify_text_block(block: Dict, panel_bbox: Tuple[int, int, int, int], is_f
 
     # 3. Onomatopées (courtes, souvent majuscules isolées, point d'exclamation fort, ou mots d'effet)
     upper_letters = re.findall(r"[A-ZÀ-Ý]", text)
-    if len(text) <= 10 and len(upper_letters) >= len(text) * 0.7:
-        if text.endswith("!") or re.search(r"\b(?:boom|bam|clac|crash|slam|gulp|gloups|bang|pant|sigh|sob|argh)\b", text, re.I):
+    if len(text) <= 12 and (len(upper_letters) >= len(text) * 0.7 or SOUND_EFFECT_RE.search(text)):
+        if text.endswith("!") or SOUND_EFFECT_RE.search(text):
             return "sound_effect"
 
     # 4. Par défaut : bulle de dialogue
